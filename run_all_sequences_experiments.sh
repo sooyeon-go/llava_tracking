@@ -7,6 +7,8 @@ RESULTS_ROOT="${RESULTS_ROOT:-${SCRIPT_DIR}/davis_tracking_multi_sequence}"
 RUN_EXPERIMENT1="${RUN_EXPERIMENT1:-1}"
 RUN_EXPERIMENT2="${RUN_EXPERIMENT2:-1}"
 SKIP_SHARED_HIGH_MOTION="${SKIP_SHARED_HIGH_MOTION:-1}"
+MOVEMENT_THRESHOLD="${MOVEMENT_THRESHOLD:-1}"
+MEANINGFUL_THRESHOLD="${MEANINGFUL_THRESHOLD:-10}"
 
 sequences=(
   "boat"
@@ -74,6 +76,15 @@ done
 
 echo
 echo "Results root: ${RESULTS_ROOT}"
+echo "Analyzing predicted point movement across all completed runs"
+if ! python "${SCRIPT_DIR}/analyze_tracking_movements.py" \
+  --results-root "${RESULTS_ROOT}" \
+  --movement-threshold "${MOVEMENT_THRESHOLD}" \
+  --meaningful-threshold "${MEANINGFUL_THRESHOLD}"; then
+  echo "ERROR: movement analysis failed" >&2
+  failed_runs+=("movement-analysis")
+fi
+
 if (( ${#failed_runs[@]} > 0 )); then
   echo "Failed or skipped runs:" >&2
   printf '  - %s\n' "${failed_runs[@]}" >&2
