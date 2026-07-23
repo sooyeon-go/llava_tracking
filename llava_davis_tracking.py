@@ -90,6 +90,11 @@ def parse_args() -> argparse.Namespace:
         help="Maximum number of mask objects to initialize.",
     )
     parser.add_argument(
+        "--description",
+        default=None,
+        help="Text description of what to track; defaults to the folder name.",
+    )
+    parser.add_argument(
         "--max-frames",
         type=int,
         default=16,
@@ -122,8 +127,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--save-visualizations",
         action="store_true",
-        help="Save RGB frames overlaid with predicted points.",
+        help="Save RGB frames overlaid with predicted points and trajectories.",
     )
+    parser.add_argument(
+        "--save-overlay-gif",
+        action="store_true",
+        help="Also save a downscaled animated GIF of the overlays.",
+    )
+    parser.add_argument("--overlay-fps", type=float, default=4.0)
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -136,6 +147,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--target-input-pixels must be > 0")
     if args.max_objects <= 0:
         parser.error("--max-objects must be > 0")
+    if args.overlay_fps <= 0:
+        parser.error("--overlay-fps must be > 0")
     return args
 
 
@@ -347,7 +360,7 @@ def draw_markers(
 
 
 def build_prompt(
-    sequence_name: str,
+    description: str,
     points: list[tuple[float, float]],
     image_size: tuple[int, int],
     num_frames: int,
@@ -360,10 +373,10 @@ def build_prompt(
     timestamps = ", ".join(f"{index:.1f}" for index in range(num_frames))
     source_track = (
         f'<tracks coords="0.0 {source_fields}">'
-        f"{sequence_name} source points</tracks>"
+        f"{description} source points</tracks>"
     )
     return (
-        f"Track the marked points on the {sequence_name} object(s) through the "
+        f"Track the marked points corresponding to '{description}' through the "
         "entire source video. The points are marked on the first frame. Point "
         "coordinates are integers from 0 to 1000 relative to each full frame. "
         "Keep the same 0-based point IDs. The source points are:\n"
@@ -553,20 +566,59 @@ def save_visualizations(
     results: list[dict[str, Any]],
     output_dir: Path,
     radius: int,
+    description: str,
+    gif_path: Path | None,
+    overlay_fps: float,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
+    history: dict[int, list[tuple[float, float]]] = {}
+    gif_frames: list[Image.Image] = []
     for frame_path, frame_result in zip(frame_paths, results):
         image = Image.open(frame_path).convert("RGB")
         draw = ImageDraw.Draw(image)
+        title = (
+            f"{description} | sampled {frame_result['sampled_index']} "
+            f"(source #{frame_result['original_frame_index']})"
+        )
+        title_box = draw.textbbox((0, 0), title)
+        draw.rectangle(
+            (0, 0, title_box[2] + 12, title_box[3] + 10),
+            fill=(0, 0, 0),
+        )
+        draw.text((6, 5), title, fill="white")
         for point in frame_result["points"]:
             if point["pixel_xy"] is None:
                 continue
             x, y = point["pixel_xy"]
             point_id = int(point["point_id"])
             color = COLORS[point_id % len(COLORS)]
+            history.setdefault(point_id, []).append((x, y))
+            if len(history[point_id]) >= 2:
+                draw.line(history[point_id], fill=color, width=3)
+            draw.ellipse(
+                (x - radius, y - radius, x + radius, y + radius),
+                outline=color,
+                width=4,
+            )
             draw.line((x - radius, y, x + radius, y), fill=color, width=4)
             draw.line((x, y - radius, x, y + radius), fill=color, width=4)
+            draw.text((x + radius + 3, y - radius), f"id={point_id}", fill=color)
         image.save(output_dir / f"{frame_path.stem}.png")
+        if gif_path is not None:
+            preview = image.copy()
+            if preview.width > 832:
+                preview.thumbnail((832, 832), Image.Resampling.LANCZOS)
+            gif_frames.append(preview)
+
+    if gif_path is not None and gif_frames:
+        duration_ms = round(1000 / overlay_fps)
+        gif_frames[0].save(
+            gif_path,
+            save_all=True,
+            append_images=gif_frames[1:],
+            duration=duration_ms,
+            loop=0,
+        )
 
 
 def main() -> None:
@@ -590,6 +642,7 @@ def main() -> None:
         frame_paths,
         args.target_input_pixels,
     )
+    description = args.description or frames_dir.name
     LOGGER.info(
         "Frames: %d/%d, original=%s, model_input=%s",
         len(frame_paths),
@@ -625,7 +678,7 @@ def main() -> None:
     ]
     frames[0] = draw_markers(frames[0], input_points, args.marker_radius)
     prompt = build_prompt(
-        frames_dir.name,
+        description,
         input_points,
         input_size,
         len(frames),
@@ -661,6 +714,7 @@ def main() -> None:
     ]
     payload = {
         "sequence": frames_dir.name,
+        "description": description,
         "frames_dir": str(frames_dir),
         "annotation_dir": str(annotation_dir) if annotation_dir else None,
         "original_size": list(original_size),
@@ -689,6 +743,9 @@ def main() -> None:
             results,
             output_dir / "visualizations",
             args.marker_radius,
+            description,
+            output_dir / "overlay_preview.gif" if args.save_overlay_gif else None,
+            args.overlay_fps,
         )
     LOGGER.info(
         "Saved results to %s (coverage=%.3f, mask_hit_rate=%s)",
