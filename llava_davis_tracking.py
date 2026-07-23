@@ -13,6 +13,7 @@ import json
 import logging
 import math
 import re
+import shutil
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -609,6 +610,8 @@ def save_visualizations(
     gif_path: Path | None,
     overlay_fps: float,
 ) -> None:
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     gif_frames: list[Image.Image] = []
     for frame_path, frame_result in zip(frame_paths, results):
@@ -645,6 +648,11 @@ def save_visualizations(
                 preview.thumbnail((832, 832), Image.Resampling.LANCZOS)
             gif_frames.append(preview)
 
+    LOGGER.info(
+        "Wrote %d visualization frames to %s",
+        len(frame_paths),
+        output_dir,
+    )
     if gif_path is not None and gif_frames:
         duration_ms = round(1000 / overlay_fps)
         gif_frames[0].save(
