@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import math
 import re
 from pathlib import Path
 from typing import Any, Iterable
@@ -21,8 +20,6 @@ from PIL import Image, ImageDraw
 
 LOGGER = logging.getLogger("llava_davis_tracking")
 COORDINATE_SCALE = 1000.0
-DEFAULT_TARGET_PIXELS = 832 * 480
-VISION_ALIGNMENT = 28  # patch_size (14) * spatial_merge_size (2)
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 COLORS = (
     "red",
@@ -100,12 +97,6 @@ def parse_args() -> argparse.Namespace:
         default=16,
         help="Uniformly sample at most this many frames; 0 keeps every frame.",
     )
-    parser.add_argument(
-        "--target-input-pixels",
-        type=int,
-        default=DEFAULT_TARGET_PIXELS,
-        help="Resize each frame near this area while preserving aspect ratio.",
-    )
     parser.add_argument("--marker-radius", type=int, default=10)
     parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument("--device-map", default="auto")
@@ -143,8 +134,6 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.max_frames < 0:
         parser.error("--max-frames must be >= 0")
-    if args.target_input_pixels <= 0:
-        parser.error("--target-input-pixels must be > 0")
     if args.max_objects <= 0:
         parser.error("--max-objects must be > 0")
     if args.overlay_fps <= 0:
@@ -249,53 +238,15 @@ def points_from_mask(
     return points, selected_values
 
 
-def aligned_size(
-    image_size: tuple[int, int],
-    target_pixels: int,
-) -> tuple[int, int]:
-    width, height = image_size
-    scale = math.sqrt(target_pixels / (width * height))
-    scaled_width = width * scale
-    scaled_height = height * scale
-
-    width_floor = max(
-        VISION_ALIGNMENT,
-        math.floor(scaled_width / VISION_ALIGNMENT) * VISION_ALIGNMENT,
-    )
-    width_ceil = width_floor + VISION_ALIGNMENT
-    height_floor = max(
-        VISION_ALIGNMENT,
-        math.floor(scaled_height / VISION_ALIGNMENT) * VISION_ALIGNMENT,
-    )
-    height_ceil = height_floor + VISION_ALIGNMENT
-    candidates = (
-        (width_floor, height_floor),
-        (width_floor, height_ceil),
-        (width_ceil, height_floor),
-        (width_ceil, height_ceil),
-    )
-    aspect_ratio = width / height
-    return min(
-        candidates,
-        key=lambda size: (
-            abs(size[0] * size[1] - target_pixels) / target_pixels
-            + abs(size[0] / size[1] - aspect_ratio) / aspect_ratio
-        ),
-    )
-
-
 def prepare_frames(
     frame_paths: list[Path],
-    target_pixels: int,
-) -> tuple[list[Image.Image], tuple[int, int], tuple[int, int]]:
-    original_frames = [
-        Image.open(path).convert("RGB")
-        for path in frame_paths
-    ]
-    original_size = original_frames[0].size
+) -> tuple[list[Image.Image], tuple[int, int]]:
+    """Load frames as-is; LLaVA's video processor chooses the model resolution."""
+    frames = [Image.open(path).convert("RGB") for path in frame_paths]
+    original_size = frames[0].size
     inconsistent = [
         (path.name, frame.size)
-        for path, frame in zip(frame_paths, original_frames)
+        for path, frame in zip(frame_paths, frames)
         if frame.size != original_size
     ]
     if inconsistent:
@@ -303,14 +254,7 @@ def prepare_frames(
             "All frames must have the same resolution; mismatches: "
             f"{inconsistent[:5]}"
         )
-    input_size = aligned_size(original_size, target_pixels)
-    prepared = [
-        frame.resize(input_size, Image.Resampling.LANCZOS)
-        if frame.size != input_size
-        else frame.copy()
-        for frame in original_frames
-    ]
-    return prepared, original_size, input_size
+    return frames, original_size
 
 
 def normalized_point(
@@ -638,17 +582,13 @@ def main() -> None:
         all_frame_paths,
         args.max_frames,
     )
-    frames, original_size, input_size = prepare_frames(
-        frame_paths,
-        args.target_input_pixels,
-    )
+    frames, original_size = prepare_frames(frame_paths)
     description = args.description or frames_dir.name
     LOGGER.info(
-        "Frames: %d/%d, original=%s, model_input=%s",
+        "Frames: %d/%d, frame_size=%s (processor chooses model resolution)",
         len(frame_paths),
         len(all_frame_paths),
         original_size,
-        input_size,
     )
 
     if args.point:
@@ -670,17 +610,11 @@ def main() -> None:
             list(zip(mask_values, source_points)),
         )
 
-    scale_x = input_size[0] / original_size[0]
-    scale_y = input_size[1] / original_size[1]
-    input_points = [
-        (point[0] * scale_x, point[1] * scale_y)
-        for point in source_points
-    ]
-    frames[0] = draw_markers(frames[0], input_points, args.marker_radius)
+    frames[0] = draw_markers(frames[0], source_points, args.marker_radius)
     prompt = build_prompt(
         description,
-        input_points,
-        input_size,
+        source_points,
+        original_size,
         len(frames),
     )
 
@@ -718,7 +652,6 @@ def main() -> None:
         "frames_dir": str(frames_dir),
         "annotation_dir": str(annotation_dir) if annotation_dir else None,
         "original_size": list(original_size),
-        "model_input_size": list(input_size),
         "num_source_frames": len(all_frame_paths),
         "num_sampled_frames": len(frame_paths),
         "source_points": [list(point) for point in source_points],

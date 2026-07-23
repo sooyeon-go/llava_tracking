@@ -9,8 +9,7 @@ ANNOTATION_DIR="${ANNOTATION_DIR:-/data/shared-vilab/datasets/DAVIS/Annotations/
 FRAMES_DIR="${FRAMES_DIR:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/davis_tracking_results/bear}"
 MAX_FRAMES="${MAX_FRAMES:-16}"
-TARGET_INPUT_PIXELS="${TARGET_INPUT_PIXELS:-399360}"  # 832 * 480
-DESCRIPTION="${DESCRIPTION:-the bear moving through the scene}"
+DESCRIPTION="${DESCRIPTION:-Detect the bear in the scene}"
 
 export CUDA_VISIBLE_DEVICES="${GPU_ID}"
 
@@ -22,7 +21,6 @@ args=(
   --output-dir "${OUTPUT_DIR}"
   --description "${DESCRIPTION}"
   --max-frames "${MAX_FRAMES}"
-  --target-input-pixels "${TARGET_INPUT_PIXELS}"
   --device-map auto
   --dtype bfloat16
   --attn-implementation sdpa
