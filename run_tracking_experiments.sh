@@ -26,6 +26,7 @@ args=(
   --output-dir "${OUTPUT_DIR}"
   --description "${DESCRIPTION}"
   --source-fps "${SOURCE_FPS}"
+  --overlay-fps "${OVERLAY_FPS:-4}"
   --device-map auto
   --dtype bfloat16
   --attn-implementation sdpa

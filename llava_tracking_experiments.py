@@ -65,6 +65,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--description", default="the bear")
     parser.add_argument("--source-fps", type=float, default=24.0)
     parser.add_argument("--max-new-tokens", type=int, default=1024)
+    parser.add_argument("--overlay-fps", type=float, default=4.0)
     parser.add_argument("--device-map", default="auto")
     parser.add_argument(
         "--dtype",
@@ -79,6 +80,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.source_fps <= 0:
         parser.error("--source-fps must be > 0")
+    if args.overlay_fps <= 0:
+        parser.error("--overlay-fps must be > 0")
     return args
 
 
@@ -297,11 +300,35 @@ def closest_track_timestamp(
     return closest
 
 
+def save_overlay_gif(
+    frames: list[Image.Image],
+    gif_path: Path,
+    overlay_fps: float,
+) -> None:
+    if not frames:
+        return
+    previews: list[Image.Image] = []
+    for frame in frames:
+        preview = frame.copy().convert("RGB")
+        if preview.width > 832:
+            preview.thumbnail((832, 832), Image.Resampling.LANCZOS)
+        previews.append(preview)
+    duration_ms = max(1, round(1000 / overlay_fps))
+    previews[0].save(
+        gif_path,
+        save_all=True,
+        append_images=previews[1:],
+        duration=duration_ms,
+        loop=0,
+    )
+
+
 def save_track_outputs(
     case_dir: Path,
     tracks: dict[float, dict[int, tuple[float, float]]],
     frame_paths: list[Path],
     expected_timestamps: list[float],
+    overlay_fps: float,
 ) -> dict[str, Any]:
     overlays_dir = case_dir / "overlays"
     if overlays_dir.exists():
@@ -321,6 +348,7 @@ def save_track_outputs(
     )
     frame_results: list[dict[str, Any]] = []
     all_pixel_points: list[tuple[float, float]] = []
+    gif_frames: list[Image.Image] = []
     for frame_index, (frame_path, expected_timestamp) in enumerate(
         zip(frame_paths, expected_timestamps)
     ):
@@ -358,6 +386,7 @@ def save_track_outputs(
                 }
             )
         image.save(overlays_dir / f"{frame_path.stem}.png")
+        gif_frames.append(image)
         frame_results.append(
             {
                 "frame_index": frame_index,
@@ -368,6 +397,7 @@ def save_track_outputs(
             }
         )
 
+    save_overlay_gif(gif_frames, case_dir / "overlay_preview.gif", overlay_fps)
     span_px = None
     if all_pixel_points:
         xs = [point[0] for point in all_pixel_points]
@@ -395,6 +425,7 @@ def run_case(
     video_path: Path,
     source_fps: float,
     case_dir: Path,
+    overlay_fps: float,
 ) -> dict[str, Any]:
     frame_paths, original_indices = select_frames(
         all_frame_paths,
@@ -437,9 +468,15 @@ def run_case(
             tracks,
             frame_paths,
             expected_timestamps,
+            overlay_fps,
         )
         result["num_parsed_timestamps"] = len(tracks)
         result["trajectory_span_px"] = track_payload["trajectory_span_px"]
+    else:
+        # Case 5 has no points; still save an input GIF for side-by-side review.
+        input_frames = [Image.open(path).convert("RGB") for path in frame_paths]
+        save_overlay_gif(input_frames, case_dir / "input_preview.gif", overlay_fps)
+        result["gif"] = "input_preview.gif"
     return result
 
 
@@ -501,6 +538,7 @@ def main() -> None:
                     video_path,
                     args.source_fps,
                     case_dir,
+                    args.overlay_fps,
                 )
             except Exception:
                 error_text = traceback.format_exc()
