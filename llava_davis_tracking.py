@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import re
 from pathlib import Path
 from typing import Any, Iterable
@@ -321,10 +322,13 @@ def build_prompt(
     )
     return (
         f"Track the marked points corresponding to '{description}' through the "
-        "entire source video. The points are marked on the first frame. Point "
-        "coordinates are integers from 0 to 1000 relative to each full frame. "
-        "Keep the same 0-based point IDs. The source points are:\n"
+        "entire source video. The points are marked only on the first frame. "
+        "Point coordinates are integers from 0 to 1000 relative to each full "
+        "frame. Keep the same 0-based point IDs. The source points are:\n"
         f"{source_track}\n"
+        "For EVERY later timestamp, output the updated absolute position of the "
+        "same physical point after the object moves. Do not copy the first-frame "
+        "coordinates into later frames unless the object truly did not move. "
         "Return each point's absolute position at every supplied frame in "
         "OneVision2's native frame-major grammar. Frame groups must be separated "
         "by semicolons, and each group is: timestamp point_id x y [point_id x y "
@@ -453,6 +457,42 @@ def mask_hit(
     return int(mask[y, x]) == mask_value
 
 
+def ground_truth_centroid(
+    annotation_dir: Path,
+    frame_path: Path,
+    mask_value: int,
+) -> tuple[float, float] | None:
+    try:
+        mask_path = matching_mask(annotation_dir, frame_path)
+    except FileNotFoundError:
+        return None
+    mask = np.asarray(Image.open(mask_path))
+    if mask.ndim == 3:
+        mask = mask[..., 0]
+    y_coords, x_coords = np.nonzero(mask == mask_value)
+    if len(x_coords) == 0:
+        return None
+    return float(x_coords.mean()), float(y_coords.mean())
+
+
+def trajectory_span(results: list[dict[str, Any]]) -> dict[int, float]:
+    spans: dict[int, float] = {}
+    histories: dict[int, list[tuple[float, float]]] = {}
+    for frame in results:
+        for point in frame["points"]:
+            if point["pixel_xy"] is None:
+                continue
+            point_id = int(point["point_id"])
+            histories.setdefault(point_id, []).append(
+                (float(point["pixel_xy"][0]), float(point["pixel_xy"][1]))
+            )
+    for point_id, coords in histories.items():
+        xs = [x for x, _ in coords]
+        ys = [y for _, y in coords]
+        spans[point_id] = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+    return spans
+
+
 def build_results(
     tracks: dict[float, dict[int, tuple[float, float]]],
     frame_paths: list[Path],
@@ -475,21 +515,27 @@ def build_results(
                 else None
             )
             hit = None
-            if pixel is not None and annotation_dir is not None and mask_value is not None:
-                try:
-                    hit = mask_hit(
-                        matching_mask(annotation_dir, frame_path),
-                        pixel,
-                        mask_value,
-                    )
-                except FileNotFoundError:
-                    hit = None
+            gt_centroid = None
+            if annotation_dir is not None and mask_value is not None:
+                gt_centroid = ground_truth_centroid(
+                    annotation_dir, frame_path, mask_value
+                )
+                if pixel is not None:
+                    try:
+                        hit = mask_hit(
+                            matching_mask(annotation_dir, frame_path),
+                            pixel,
+                            mask_value,
+                        )
+                    except FileNotFoundError:
+                        hit = None
             points.append(
                 {
                     "point_id": point_id,
                     "mask_value": mask_value,
                     "normalized_xy": list(normalized) if normalized else None,
                     "pixel_xy": list(pixel) if pixel else None,
+                    "gt_centroid_xy": list(gt_centroid) if gt_centroid else None,
                     "inside_ground_truth_mask": hit,
                 }
             )
@@ -516,13 +562,15 @@ def save_visualizations(
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     history: dict[int, list[tuple[float, float]]] = {}
+    gt_history: dict[int, list[tuple[float, float]]] = {}
     gif_frames: list[Image.Image] = []
     for frame_path, frame_result in zip(frame_paths, results):
         image = Image.open(frame_path).convert("RGB")
         draw = ImageDraw.Draw(image)
         title = (
             f"{description} | sampled {frame_result['sampled_index']} "
-            f"(source #{frame_result['original_frame_index']})"
+            f"(source #{frame_result['original_frame_index']}) | "
+            "pred=cross  gt=circle"
         )
         title_box = draw.textbbox((0, 0), title)
         draw.rectangle(
@@ -531,11 +579,22 @@ def save_visualizations(
         )
         draw.text((6, 5), title, fill="white")
         for point in frame_result["points"]:
+            point_id = int(point["point_id"])
+            color = COLORS[point_id % len(COLORS)]
+            if point.get("gt_centroid_xy") is not None:
+                gt_x, gt_y = point["gt_centroid_xy"]
+                gt_history.setdefault(point_id, []).append((gt_x, gt_y))
+                if len(gt_history[point_id]) >= 2:
+                    draw.line(gt_history[point_id], fill="blue", width=3)
+                draw.ellipse(
+                    (gt_x - radius, gt_y - radius, gt_x + radius, gt_y + radius),
+                    outline="blue",
+                    width=4,
+                )
+                draw.text((gt_x + radius + 3, gt_y + 2), f"gt{point_id}", fill="blue")
             if point["pixel_xy"] is None:
                 continue
             x, y = point["pixel_xy"]
-            point_id = int(point["point_id"])
-            color = COLORS[point_id % len(COLORS)]
             history.setdefault(point_id, []).append((x, y))
             if len(history[point_id]) >= 2:
                 draw.line(history[point_id], fill=color, width=3)
@@ -546,7 +605,7 @@ def save_visualizations(
             )
             draw.line((x - radius, y, x + radius, y), fill=color, width=4)
             draw.line((x, y - radius, x, y + radius), fill=color, width=4)
-            draw.text((x + radius + 3, y - radius), f"id={point_id}", fill=color)
+            draw.text((x + radius + 3, y - radius), f"pred{point_id}", fill=color)
         image.save(output_dir / f"{frame_path.stem}.png")
         if gif_path is not None:
             preview = image.copy()
@@ -646,6 +705,17 @@ def main() -> None:
         for point in frame["points"]
         if point["inside_ground_truth_mask"] is not None
     ]
+    spans = trajectory_span(results)
+    for point_id, span in spans.items():
+        if span < 1.0:
+            LOGGER.warning(
+                "Predicted trajectory for point_id=%d is nearly static "
+                "(span=%.2f px). Visualization is showing a fixed point because "
+                "the model copied the same coordinates across frames. Check "
+                "raw_output.txt.",
+                point_id,
+                span,
+            )
     payload = {
         "sequence": frames_dir.name,
         "description": description,
@@ -656,6 +726,7 @@ def main() -> None:
         "num_sampled_frames": len(frame_paths),
         "source_points": [list(point) for point in source_points],
         "mask_values": mask_values,
+        "prediction_span_px": {str(key): value for key, value in spans.items()},
         "coverage": (
             sum(
                 point["pixel_xy"] is not None
