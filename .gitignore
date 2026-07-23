@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+davis_tracking_results/
+llava_correspondence_results/
