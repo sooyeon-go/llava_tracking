@@ -16,8 +16,8 @@ FRAMES_DIR="${FRAMES_DIR:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/davis_tracking_results/bear}"
 MAX_FRAMES="${MAX_FRAMES:-16}"
 FRAME_SAMPLING="${FRAME_SAMPLING:-first}"
-DESCRIPTION="${DESCRIPTION:-Tracking the bear moving through the scene}"
-TRACKING_MODE="${TRACKING_MODE:-point-prompt}"
+DESCRIPTION="${DESCRIPTION:-the bear}"
+TRACKING_MODE="${TRACKING_MODE:-text-grounding}"
 
 export CUDA_VISIBLE_DEVICES="${GPU_ID}"
 

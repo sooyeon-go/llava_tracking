@@ -96,7 +96,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tracking-mode",
         choices=("text-grounding", "point-prompt"),
-        default="point-prompt",
+        default="text-grounding",
         help=(
             "point-prompt initializes tracking from a mask/manual point; "
             "text-grounding finds the described object from text alone."
@@ -367,25 +367,12 @@ def build_point_prompt(
 
 
 def build_grounding_prompt(description: str, num_frames: int) -> str:
-    """Prompt for text-only object grounding followed by point tracking."""
-    timestamps = ", ".join(f"{index:.1f}" for index in range(num_frames))
-    return (
-        f"Ground the complete object matching this description in the source "
-        f"video: '{description}'. First localize the described object in frame "
-        "0.0 using only the text and visual content; there is no input point or "
-        "marker. Choose one representative point near the center and inside the "
-        "object, assign it point id 0, and track that same physical object point "
-        "through every supplied frame. If multiple distinct objects match the "
-        "description, assign consecutive 0-based point IDs and track one center "
-        "point per object. Coordinates must be absolute integer positions from "
-        "0 to 1000 relative to each full frame. Return updated coordinates at "
-        "EVERY timestamp; do not copy a coordinate to later frames unless the "
-        "object truly did not move. Use OneVision2's native frame-major grammar "
-        "with semicolon-separated groups: timestamp point_id x y [point_id x y "
-        "...]. Use exactly these timestamps:\n"
-        f"{timestamps}\n"
-        "Answer with exactly one <tracks> element and no explanation."
-    )
+    """Use the concise instruction format seen during tracking training."""
+    del num_frames
+    referring_expression = description.strip()
+    if referring_expression.lower().startswith("track "):
+        return referring_expression
+    return f"Track {referring_expression}"
 
 
 def parse_tracks(text: str) -> dict[float, dict[int, tuple[float, float]]]:
