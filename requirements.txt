@@ -1,0 +1,11 @@
+# LLaVA-OneVision-2 inference (image + frame-folder video)
+# Install torch separately for your CUDA version; see setup_llava_env.sh.
+transformers>=5.7.0
+accelerate>=0.26.0
+pillow>=10.0.0
+numpy>=1.24.0
+requests>=2.31.0
+decord>=0.6.0
+qwen-vl-utils>=0.0.8
+sentencepiece>=0.2.0
+protobuf>=4.25.0
