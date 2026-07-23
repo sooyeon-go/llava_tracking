@@ -594,8 +594,6 @@ def save_visualizations(
     overlay_fps: float,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    history: dict[int, list[tuple[float, float]]] = {}
-    gt_history: dict[int, list[tuple[float, float]]] = {}
     gif_frames: list[Image.Image] = []
     for frame_path, frame_result in zip(frame_paths, results):
         image = Image.open(frame_path).convert("RGB")
@@ -616,9 +614,6 @@ def save_visualizations(
             color = COLORS[point_id % len(COLORS)]
             if point.get("gt_centroid_xy") is not None:
                 gt_x, gt_y = point["gt_centroid_xy"]
-                gt_history.setdefault(point_id, []).append((gt_x, gt_y))
-                if len(gt_history[point_id]) >= 2:
-                    draw.line(gt_history[point_id], fill="blue", width=3)
                 draw.ellipse(
                     (gt_x - radius, gt_y - radius, gt_x + radius, gt_y + radius),
                     outline="blue",
@@ -628,9 +623,6 @@ def save_visualizations(
             if point["pixel_xy"] is None:
                 continue
             x, y = point["pixel_xy"]
-            history.setdefault(point_id, []).append((x, y))
-            if len(history[point_id]) >= 2:
-                draw.line(history[point_id], fill=color, width=3)
             draw.ellipse(
                 (x - radius, y - radius, x + radius, y + radius),
                 outline=color,
