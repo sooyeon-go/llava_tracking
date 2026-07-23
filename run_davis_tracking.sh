@@ -15,6 +15,7 @@ ANNOTATION_DIR="${ANNOTATION_DIR:-/data/shared-vilab/datasets/DAVIS/Annotations/
 FRAMES_DIR="${FRAMES_DIR:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/davis_tracking_results/bear}"
 MAX_FRAMES="${MAX_FRAMES:-16}"
+FRAME_SAMPLING="${FRAME_SAMPLING:-first}"
 DESCRIPTION="${DESCRIPTION:-Tracking the bear moving through the scene}"
 TRACKING_MODE="${TRACKING_MODE:-point-prompt}"
 
@@ -29,6 +30,7 @@ args=(
   --description "${DESCRIPTION}"
   --tracking-mode "${TRACKING_MODE}"
   --max-frames "${MAX_FRAMES}"
+  --frame-sampling "${FRAME_SAMPLING}"
   --device-map auto
   --dtype bfloat16
   --attn-implementation sdpa

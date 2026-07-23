@@ -105,7 +105,16 @@ def parse_args() -> argparse.Namespace:
         "--max-frames",
         type=int,
         default=16,
-        help="Uniformly sample at most this many frames; 0 keeps every frame.",
+        help="Use at most this many frames; 0 keeps every frame.",
+    )
+    parser.add_argument(
+        "--frame-sampling",
+        choices=("first", "uniform"),
+        default="first",
+        help=(
+            "first: use the leading consecutive frames; "
+            "uniform: spread frames across the whole sequence."
+        ),
     )
     parser.add_argument("--marker-radius", type=int, default=10)
     parser.add_argument("--max-new-tokens", type=int, default=1024)
@@ -187,12 +196,19 @@ def infer_frames_dir(annotation_dir: Path) -> Path:
     return Path(*parts)
 
 
-def uniformly_sample(paths: list[Path], max_frames: int) -> tuple[list[Path], list[int]]:
+def select_frames(
+    paths: list[Path],
+    max_frames: int,
+    sampling: str,
+) -> tuple[list[Path], list[int]]:
     if max_frames == 0 or len(paths) <= max_frames:
         return paths, list(range(len(paths)))
-    indices = np.linspace(0, len(paths) - 1, max_frames).round().astype(int)
-    unique_indices = list(dict.fromkeys(indices.tolist()))
-    return [paths[index] for index in unique_indices], unique_indices
+    if sampling == "first":
+        indices = list(range(max_frames))
+    else:
+        indices = np.linspace(0, len(paths) - 1, max_frames).round().astype(int)
+        indices = list(dict.fromkeys(indices.tolist()))
+    return [paths[index] for index in indices], indices
 
 
 def matching_mask(annotation_dir: Path, frame_path: Path) -> Path:
@@ -653,9 +669,10 @@ def main() -> None:
         else infer_frames_dir(annotation_dir)
     )
     all_frame_paths = image_files(frames_dir)
-    frame_paths, original_indices = uniformly_sample(
+    frame_paths, original_indices = select_frames(
         all_frame_paths,
         args.max_frames,
+        args.frame_sampling,
     )
     frames, original_size = prepare_frames(frame_paths)
     description = args.description or frames_dir.name
