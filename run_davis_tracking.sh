@@ -15,7 +15,7 @@ ANNOTATION_DIR="${ANNOTATION_DIR:-/data/shared-vilab/datasets/DAVIS/Annotations/
 FRAMES_DIR="${FRAMES_DIR:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/davis_tracking_results/bear}"
 MAX_FRAMES="${MAX_FRAMES:-16}"
-FRAME_SAMPLING="${FRAME_SAMPLING:-first}"
+FRAME_SAMPLING="${FRAME_SAMPLING:-uniform}"
 DESCRIPTION="${DESCRIPTION:-the bear}"
 TRACKING_MODE="${TRACKING_MODE:-text-grounding}"
 

@@ -111,7 +111,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--frame-sampling",
         choices=("first", "uniform"),
-        default="first",
+        default="uniform",
         help=(
             "first: use the leading consecutive frames; "
             "uniform: spread frames across the whole sequence."

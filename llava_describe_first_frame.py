@@ -15,6 +15,7 @@ import re
 import shutil
 from pathlib import Path
 
+import numpy as np
 from PIL import Image, ImageDraw
 
 LOGGER = logging.getLogger("llava_describe_first_frame")
@@ -64,7 +65,16 @@ def parse_args() -> argparse.Namespace:
         "--max-frames",
         type=int,
         default=16,
-        help="Independently localize the first N frames; 0 keeps every frame.",
+        help="Independently localize at most N frames; 0 keeps every frame.",
+    )
+    parser.add_argument(
+        "--frame-sampling",
+        choices=("first", "uniform"),
+        default="uniform",
+        help=(
+            "first: leading consecutive frames; "
+            "uniform: spread frames across the whole sequence."
+        ),
     )
     parser.add_argument(
         "--prompt",
@@ -139,7 +149,11 @@ def resolve_frame_paths(args: argparse.Namespace) -> list[Path]:
         raise FileNotFoundError(f"No image files found in: {frames_dir}")
     if args.max_frames == 0 or len(paths) <= args.max_frames:
         return paths
-    return paths[: args.max_frames]
+    if args.frame_sampling == "first":
+        return paths[: args.max_frames]
+    indices = np.linspace(0, len(paths) - 1, args.max_frames).round().astype(int)
+    indices = list(dict.fromkeys(indices.tolist()))
+    return [paths[index] for index in indices]
 
 
 def parse_points(text: str) -> list[tuple[float, float]]:
@@ -272,8 +286,9 @@ def main() -> None:
 
     frame_paths = resolve_frame_paths(args)
     LOGGER.info(
-        "Per-image localization on %d frame(s); not video tracking",
+        "Per-image localization on %d frame(s) with sampling=%s; not video tracking",
         len(frame_paths),
+        args.frame_sampling if args.image is None else "single-image",
     )
 
     dtype = getattr(torch, args.dtype)
@@ -354,6 +369,9 @@ def main() -> None:
     payload = {
         "mode": "per_image_pointing",
         "prompt": args.prompt,
+        "frame_sampling": (
+            args.frame_sampling if args.image is None else "single-image"
+        ),
         "num_frames": len(frame_paths),
         "frames": frame_results,
     }
