@@ -93,6 +93,15 @@ def parse_args() -> argparse.Namespace:
         help="Text description of what to track; defaults to the folder name.",
     )
     parser.add_argument(
+        "--tracking-mode",
+        choices=("text-grounding", "point-prompt"),
+        default="text-grounding",
+        help=(
+            "text-grounding finds the described object from text alone; "
+            "point-prompt initializes tracking from a mask/manual point."
+        ),
+    )
+    parser.add_argument(
         "--max-frames",
         type=int,
         default=16,
@@ -139,6 +148,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--max-objects must be > 0")
     if args.overlay_fps <= 0:
         parser.error("--overlay-fps must be > 0")
+    if args.tracking_mode == "text-grounding" and args.point:
+        parser.error("--point can only be used with --tracking-mode point-prompt")
     return args
 
 
@@ -304,7 +315,7 @@ def draw_markers(
     return marked
 
 
-def build_prompt(
+def build_point_prompt(
     description: str,
     points: list[tuple[float, float]],
     image_size: tuple[int, int],
@@ -332,6 +343,28 @@ def build_prompt(
         "Return each point's absolute position at every supplied frame in "
         "OneVision2's native frame-major grammar. Frame groups must be separated "
         "by semicolons, and each group is: timestamp point_id x y [point_id x y "
+        "...]. Use exactly these timestamps:\n"
+        f"{timestamps}\n"
+        "Answer with exactly one <tracks> element and no explanation."
+    )
+
+
+def build_grounding_prompt(description: str, num_frames: int) -> str:
+    """Prompt for text-only object grounding followed by point tracking."""
+    timestamps = ", ".join(f"{index:.1f}" for index in range(num_frames))
+    return (
+        f"Ground the complete object matching this description in the source "
+        f"video: '{description}'. First localize the described object in frame "
+        "0.0 using only the text and visual content; there is no input point or "
+        "marker. Choose one representative point near the center and inside the "
+        "object, assign it point id 0, and track that same physical object point "
+        "through every supplied frame. If multiple distinct objects match the "
+        "description, assign consecutive 0-based point IDs and track one center "
+        "point per object. Coordinates must be absolute integer positions from "
+        "0 to 1000 relative to each full frame. Return updated coordinates at "
+        "EVERY timestamp; do not copy a coordinate to later frames unless the "
+        "object truly did not move. Use OneVision2's native frame-major grammar "
+        "with semicolon-separated groups: timestamp point_id x y [point_id x y "
         "...]. Use exactly these timestamps:\n"
         f"{timestamps}\n"
         "Answer with exactly one <tracks> element and no explanation."
@@ -650,37 +683,60 @@ def main() -> None:
         original_size,
     )
 
-    if args.point:
-        source_points = list(args.point)
-        mask_values: list[int | None] = [None] * len(source_points)
-    else:
-        if annotation_dir is None:
-            raise ValueError("--annotation-dir or at least one --point is required")
-        first_mask = matching_mask(annotation_dir, frame_paths[0])
-        source_points, selected_mask_values = points_from_mask(
-            first_mask,
-            args.object_id,
-            args.max_objects,
-        )
-        mask_values = list(selected_mask_values)
-        LOGGER.info(
-            "Initialized points from %s: %s",
-            first_mask,
-            list(zip(mask_values, source_points)),
-        )
-
-    frames[0] = draw_markers(frames[0], source_points, args.marker_radius)
-    prompt = build_prompt(
-        description,
-        source_points,
-        original_size,
-        len(frames),
+    first_mask = (
+        matching_mask(annotation_dir, frame_paths[0])
+        if annotation_dir is not None
+        else None
     )
+    if args.tracking_mode == "text-grounding":
+        source_points: list[tuple[float, float]] = []
+        if first_mask is not None:
+            _, selected_mask_values = points_from_mask(
+                first_mask,
+                args.object_id,
+                args.max_objects,
+            )
+            mask_values: list[int | None] = list(selected_mask_values)
+            LOGGER.info(
+                "Text-grounding mode: annotations are evaluation-only; "
+                "mask values=%s are not passed to the model",
+                mask_values,
+            )
+        else:
+            mask_values = [None]
+        prompt = build_grounding_prompt(description, len(frames))
+    else:
+        if args.point:
+            source_points = list(args.point)
+            mask_values = [None] * len(source_points)
+        else:
+            if first_mask is None:
+                raise ValueError(
+                    "point-prompt mode requires --annotation-dir or --point"
+                )
+            source_points, selected_mask_values = points_from_mask(
+                first_mask,
+                args.object_id,
+                args.max_objects,
+            )
+            mask_values = list(selected_mask_values)
+            LOGGER.info(
+                "Initialized model input points from %s: %s",
+                first_mask,
+                list(zip(mask_values, source_points)),
+            )
+        frames[0] = draw_markers(frames[0], source_points, args.marker_radius)
+        prompt = build_point_prompt(
+            description,
+            source_points,
+            original_size,
+            len(frames),
+        )
 
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "prompt.txt").write_text(prompt + "\n")
-    frames[0].save(output_dir / "marked_first_frame.png")
+    frames[0].save(output_dir / "input_first_frame.png")
     if args.dry_run:
         LOGGER.info("Dry run complete: %s", output_dir)
         return
@@ -706,6 +762,7 @@ def main() -> None:
         if point["inside_ground_truth_mask"] is not None
     ]
     spans = trajectory_span(results)
+    expected_point_count = len(mask_values)
     for point_id, span in spans.items():
         if span < 1.0:
             LOGGER.warning(
@@ -719,6 +776,7 @@ def main() -> None:
     payload = {
         "sequence": frames_dir.name,
         "description": description,
+        "tracking_mode": args.tracking_mode,
         "frames_dir": str(frames_dir),
         "annotation_dir": str(annotation_dir) if annotation_dir else None,
         "original_size": list(original_size),
@@ -733,7 +791,7 @@ def main() -> None:
                 for frame in results
                 for point in frame["points"]
             )
-            / (len(results) * len(source_points))
+            / (len(results) * expected_point_count)
         ),
         "mask_hit_rate": (
             sum(valid_hits) / len(valid_hits) if valid_hits else None

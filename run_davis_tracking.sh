@@ -15,7 +15,8 @@ ANNOTATION_DIR="${ANNOTATION_DIR:-/data/shared-vilab/datasets/DAVIS/Annotations/
 FRAMES_DIR="${FRAMES_DIR:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/davis_tracking_results/bear}"
 MAX_FRAMES="${MAX_FRAMES:-16}"
-DESCRIPTION="${DESCRIPTION:-Detect the bear in the scene}"
+DESCRIPTION="${DESCRIPTION:-the bear in the scene}"
+TRACKING_MODE="${TRACKING_MODE:-text-grounding}"
 
 export CUDA_VISIBLE_DEVICES="${GPU_ID}"
 
@@ -26,6 +27,7 @@ args=(
   --annotation-dir "${ANNOTATION_DIR}"
   --output-dir "${OUTPUT_DIR}"
   --description "${DESCRIPTION}"
+  --tracking-mode "${TRACKING_MODE}"
   --max-frames "${MAX_FRAMES}"
   --device-map auto
   --dtype bfloat16
