@@ -3,3 +3,4 @@ __pycache__/
 .venv/
 davis_tracking_results/
 llava_correspondence_results/
+output/
