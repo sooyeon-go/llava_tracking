@@ -15,6 +15,7 @@ ANNOTATION_DIR="${ANNOTATION_DIR:-/data/shared-vilab/datasets/DAVIS/Annotations/
 FRAMES_DIR="${FRAMES_DIR:-}"
 IMAGE="${IMAGE:-}"
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/davis_describe_results/bear}"
+MAX_FRAMES="${MAX_FRAMES:-16}"
 PROMPT="${PROMPT:-Where is the bear in this image? First briefly describe its location in natural language (for example: left/center/right, near foreground/background). Then point to one representative location on the bear near its center using coordinates scaled from 0 to 1000 relative to the full image, in this exact format: <points coords=\"0 x y\">bear</points>}"
 
 export CUDA_VISIBLE_DEVICES="${GPU_ID}"
@@ -26,6 +27,7 @@ args=(
   --annotation-dir "${ANNOTATION_DIR}"
   --output-dir "${OUTPUT_DIR}"
   --prompt "${PROMPT}"
+  --max-frames "${MAX_FRAMES}"
   --device-map auto
   --dtype bfloat16
   --attn-implementation sdpa

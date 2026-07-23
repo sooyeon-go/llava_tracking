@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Single-image bear localization smoke test for LLaVA-OneVision-2.
+"""Per-frame bear localization smoke test for LLaVA-OneVision-2.
 
-Loads the first DAVIS RGB frame, asks where the bear is (natural-language
-location + a point), and saves the raw answer plus an optional overlay.
+Shows each selected RGB frame independently as a single image (not video
+tracking), asks where the bear is, and saves natural-language answers plus
+optional point overlays.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import argparse
 import json
 import logging
 import re
+import shutil
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -56,12 +58,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--image",
         type=Path,
-        help="Explicit first-frame image path. Overrides --frames-dir.",
+        help="Explicit single image path. Overrides --frames-dir/--max-frames.",
+    )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=16,
+        help="Independently localize the first N frames; 0 keeps every frame.",
     )
     parser.add_argument(
         "--prompt",
         default=DEFAULT_PROMPT,
-        help="Text prompt for the single-image localization demo.",
+        help="Text prompt for each single-image localization call.",
     )
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--marker-radius", type=int, default=12)
@@ -81,7 +89,10 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("davis_describe_results/bear"),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.max_frames < 0:
+        parser.error("--max-frames must be >= 0")
+    return args
 
 
 def natural_key(path: Path) -> list[int | str]:
@@ -104,12 +115,12 @@ def infer_frames_dir(annotation_dir: Path) -> Path:
     return Path(*parts)
 
 
-def first_frame_path(args: argparse.Namespace) -> Path:
+def resolve_frame_paths(args: argparse.Namespace) -> list[Path]:
     if args.image is not None:
         image_path = args.image.resolve()
         if not image_path.is_file():
             raise FileNotFoundError(f"Image does not exist: {image_path}")
-        return image_path
+        return [image_path]
 
     frames_dir = (
         args.frames_dir.resolve()
@@ -126,7 +137,9 @@ def first_frame_path(args: argparse.Namespace) -> Path:
     paths.sort(key=natural_key)
     if not paths:
         raise FileNotFoundError(f"No image files found in: {frames_dir}")
-    return paths[0]
+    if args.max_frames == 0 or len(paths) <= args.max_frames:
+        return paths
+    return paths[: args.max_frames]
 
 
 def parse_points(text: str) -> list[tuple[float, float]]:
@@ -139,10 +152,6 @@ def parse_points(text: str) -> list[tuple[float, float]]:
     points: list[tuple[float, float]] = []
     for coords in matches:
         fields = coords.strip().split()
-        # Common formats:
-        #   "x y"
-        #   "0 x y"  (id, x, y)
-        #   "0 x y 1 x y ..."
         values: list[float] = []
         for field in fields:
             try:
@@ -199,42 +208,20 @@ def draw_points(
     return marked
 
 
-def main() -> None:
-    args = parse_args()
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(message)s",
-    )
-
-    import torch
-    from transformers import AutoModelForImageTextToText, AutoProcessor
-
-    image_path = first_frame_path(args)
-    image = Image.open(image_path).convert("RGB")
-    LOGGER.info("Localizing bear in first frame: %s (%dx%d)", image_path, *image.size)
-
-    dtype = getattr(torch, args.dtype)
-    LOGGER.info("Loading processor/model from %s", args.model_path)
-    processor = AutoProcessor.from_pretrained(
-        args.model_path,
-        trust_remote_code=True,
-    )
-    # HF demo uses AutoModelForVision2Seq; newer transformers prefer
-    # AutoModelForImageTextToText for the same OV-2 checkpoint.
-    model = AutoModelForImageTextToText.from_pretrained(
-        args.model_path,
-        trust_remote_code=True,
-        dtype=dtype,
-        device_map=args.device_map,
-        attn_implementation=args.attn_implementation,
-    ).eval()
-
+def localize_one_image(
+    model,
+    processor,
+    image: Image.Image,
+    prompt: str,
+    max_new_tokens: int,
+    torch_module,
+) -> str:
     messages = [
         {
             "role": "user",
             "content": [
                 {"type": "image"},
-                {"type": "text", "text": args.prompt},
+                {"type": "text", "text": prompt},
             ],
         }
     ]
@@ -254,56 +241,140 @@ def main() -> None:
         key: value.to(device) if hasattr(value, "to") else value
         for key, value in inputs.items()
     }
-
     tokenizer = processor.tokenizer
     pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
-    with torch.inference_mode():
+    with torch_module.inference_mode():
         generated = model.generate(
             **inputs,
-            max_new_tokens=args.max_new_tokens,
+            max_new_tokens=max_new_tokens,
             do_sample=False,
             use_cache=True,
             eos_token_id=tokenizer.eos_token_id,
             pad_token_id=pad_token_id,
         )
     prompt_length = inputs["input_ids"].shape[-1]
-    answer = processor.batch_decode(
+    return processor.batch_decode(
         generated[:, prompt_length:],
         skip_special_tokens=True,
         clean_up_tokenization_spaces=False,
     )[0].strip()
 
-    normalized_points = parse_points(answer)
-    pixel_points = [
-        normalized_to_pixel(point, image.size) for point in normalized_points
-    ]
-    if not normalized_points:
-        LOGGER.warning(
-            "No <points coords=...> could be parsed from model output; "
-            "check raw_output.txt"
-        )
+
+def main() -> None:
+    args = parse_args()
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+    )
+
+    import torch
+    from transformers import AutoModelForImageTextToText, AutoProcessor
+
+    frame_paths = resolve_frame_paths(args)
+    LOGGER.info(
+        "Per-image localization on %d frame(s); not video tracking",
+        len(frame_paths),
+    )
+
+    dtype = getattr(torch, args.dtype)
+    LOGGER.info("Loading processor/model from %s", args.model_path)
+    processor = AutoProcessor.from_pretrained(
+        args.model_path,
+        trust_remote_code=True,
+    )
+    model = AutoModelForImageTextToText.from_pretrained(
+        args.model_path,
+        trust_remote_code=True,
+        dtype=dtype,
+        device_map=args.device_map,
+        attn_implementation=args.attn_implementation,
+    ).eval()
 
     output_dir = args.output_dir.resolve()
+    overlays_dir = output_dir / "overlays"
+    raw_dir = output_dir / "raw_outputs"
+    if overlays_dir.exists():
+        shutil.rmtree(overlays_dir)
+    if raw_dir.exists():
+        shutil.rmtree(raw_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    image.save(output_dir / "input_first_frame.png")
+    overlays_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "prompt.txt").write_text(args.prompt + "\n")
-    (output_dir / "raw_output.txt").write_text(answer + "\n")
+
+    frame_results = []
+    for index, image_path in enumerate(frame_paths):
+        image = Image.open(image_path).convert("RGB")
+        LOGGER.info(
+            "[%d/%d] Localizing %s (%dx%d)",
+            index + 1,
+            len(frame_paths),
+            image_path.name,
+            *image.size,
+        )
+        answer = localize_one_image(
+            model,
+            processor,
+            image,
+            args.prompt,
+            args.max_new_tokens,
+            torch,
+        )
+        normalized_points = parse_points(answer)
+        pixel_points = [
+            normalized_to_pixel(point, image.size) for point in normalized_points
+        ]
+        if not normalized_points:
+            LOGGER.warning(
+                "No <points coords=...> parsed for %s",
+                image_path.name,
+            )
+
+        (raw_dir / f"{image_path.stem}.txt").write_text(answer + "\n")
+        if pixel_points:
+            overlay = draw_points(image, pixel_points, args.marker_radius)
+        else:
+            overlay = image.copy()
+        overlay.save(overlays_dir / f"{image_path.stem}.png")
+
+        frame_results.append(
+            {
+                "frame_index": index,
+                "image": str(image_path),
+                "image_size": list(image.size),
+                "normalized_points": [list(point) for point in normalized_points],
+                "pixel_points": [list(point) for point in pixel_points],
+                "raw_output": answer,
+            }
+        )
+        print(f"===== {image_path.name} =====")
+        print(answer)
+        print()
+
     payload = {
-        "image": str(image_path),
-        "image_size": list(image.size),
+        "mode": "per_image_pointing",
         "prompt": args.prompt,
-        "normalized_points": [list(point) for point in normalized_points],
-        "pixel_points": [list(point) for point in pixel_points],
-        "raw_output": answer,
+        "num_frames": len(frame_paths),
+        "frames": frame_results,
     }
     (output_dir / "points.json").write_text(json.dumps(payload, indent=2) + "\n")
-    if pixel_points:
-        overlay = draw_points(image, pixel_points, args.marker_radius)
-        overlay.save(output_dir / "point_overlay.png")
-        LOGGER.info("Parsed %d point(s); wrote point_overlay.png", len(pixel_points))
+    # Convenience copies for the first frame.
+    if frame_results:
+        first = frame_results[0]
+        Image.open(frame_paths[0]).convert("RGB").save(
+            output_dir / "input_first_frame.png"
+        )
+        (output_dir / "raw_output.txt").write_text(first["raw_output"] + "\n")
+        if first["pixel_points"]:
+            Image.open(overlays_dir / f"{frame_paths[0].stem}.png").save(
+                output_dir / "point_overlay.png"
+            )
 
-    print(answer)
-    LOGGER.info("Saved localization results to %s", output_dir)
+    LOGGER.info(
+        "Saved per-image localization for %d frames to %s",
+        len(frame_paths),
+        output_dir,
+    )
 
 
 if __name__ == "__main__":
