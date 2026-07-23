@@ -95,10 +95,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tracking-mode",
         choices=("text-grounding", "point-prompt"),
-        default="text-grounding",
+        default="point-prompt",
         help=(
-            "text-grounding finds the described object from text alone; "
-            "point-prompt initializes tracking from a mask/manual point."
+            "point-prompt initializes tracking from a mask/manual point; "
+            "text-grounding finds the described object from text alone."
         ),
     )
     parser.add_argument(
@@ -600,8 +600,7 @@ def save_visualizations(
         draw = ImageDraw.Draw(image)
         title = (
             f"{description} | sampled {frame_result['sampled_index']} "
-            f"(source #{frame_result['original_frame_index']}) | "
-            "pred=cross  gt=circle"
+            f"(source #{frame_result['original_frame_index']})"
         )
         title_box = draw.textbbox((0, 0), title)
         draw.rectangle(
@@ -610,18 +609,10 @@ def save_visualizations(
         )
         draw.text((6, 5), title, fill="white")
         for point in frame_result["points"]:
-            point_id = int(point["point_id"])
-            color = COLORS[point_id % len(COLORS)]
-            if point.get("gt_centroid_xy") is not None:
-                gt_x, gt_y = point["gt_centroid_xy"]
-                draw.ellipse(
-                    (gt_x - radius, gt_y - radius, gt_x + radius, gt_y + radius),
-                    outline="blue",
-                    width=4,
-                )
-                draw.text((gt_x + radius + 3, gt_y + 2), f"gt{point_id}", fill="blue")
             if point["pixel_xy"] is None:
                 continue
+            point_id = int(point["point_id"])
+            color = COLORS[point_id % len(COLORS)]
             x, y = point["pixel_xy"]
             draw.ellipse(
                 (x - radius, y - radius, x + radius, y + radius),
