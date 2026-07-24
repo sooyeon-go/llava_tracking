@@ -9,7 +9,8 @@ if [[ -z "${CONDA_DEFAULT_ENV:-}" && -z "${VIRTUAL_ENV:-}" && -x "${SCRIPT_DIR}/
   source "${SCRIPT_DIR}/.venv/bin/activate"
 fi
 
-GPU_ID="${GPU_ID:-0}"
+# Comma-separated GPU ids, e.g. GPU_IDS=0,1,2,3
+GPU_IDS="${GPU_IDS:-${GPU_ID:-0}}"
 MODEL_PATH="${MODEL_PATH:-/data/shared-vilab/pretrained_models/VLM_models/LLaVA-OneVision-2-8B-Instruct}"
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/spair_correspondence_results}"
 MAX_PAIRS="${MAX_PAIRS:-20}"
@@ -21,37 +22,89 @@ SAVE_VISUALIZATIONS="${SAVE_VISUALIZATIONS:-1}"
 OVERWRITE="${OVERWRITE:-0}"
 KEYPOINT_INDEX="${KEYPOINT_INDEX:-}"
 
-export CUDA_VISIBLE_DEVICES="${GPU_ID}"
+IFS=',' read -r -a GPU_ARRAY <<< "${GPU_IDS}"
+NUM_SHARDS="${#GPU_ARRAY[@]}"
+if (( NUM_SHARDS < 1 )); then
+  echo "ERROR: GPU_IDS is empty" >&2
+  exit 1
+fi
 
-args=(
-  python
-  "${SCRIPT_DIR}/llava_spair_correspondence.py"
-  --model-path "${MODEL_PATH}"
-  --dataset-root "${DATASET_ROOT}"
-  --split test
-  --layout-size large
-  --max-pairs "${MAX_PAIRS}"
-  --pair-sampling "${PAIR_SAMPLING}"
-  --pck-alpha "${PCK_ALPHA}"
-  --prompt-format "${PROMPT_FORMAT}"
-  --min-input-pixels "${MIN_INPUT_PIXELS}"
-  --output-dir "${OUTPUT_DIR}"
-  --device-map auto
-  --dtype bfloat16
-  --attn-implementation sdpa
-)
+mkdir -p "${OUTPUT_DIR}"
+if [[ "${OVERWRITE}" == "1" ]]; then
+  rm -f "${OUTPUT_DIR}/test_predictions.jsonl" "${OUTPUT_DIR}/test_summary.json"
+  rm -rf "${OUTPUT_DIR}/shards"
+fi
 
+extra_args=()
 if [[ "${SAVE_VISUALIZATIONS}" == "1" ]]; then
-  args+=(--save-visualizations)
+  extra_args+=(--save-visualizations)
 fi
 if [[ "${OVERWRITE}" == "1" ]]; then
-  args+=(--overwrite)
+  extra_args+=(--overwrite)
 fi
 if [[ -n "${KEYPOINT_INDEX}" ]]; then
-  args+=(--keypoint-index "${KEYPOINT_INDEX}")
+  extra_args+=(--keypoint-index "${KEYPOINT_INDEX}")
+fi
+extra_args+=("$@")
+
+pids=()
+shard_id=0
+for gpu_id in "${GPU_ARRAY[@]}"; do
+  log_file="${OUTPUT_DIR}/shard$(printf '%02d' "${shard_id}").gpu${gpu_id}.log"
+  echo "Launching shard ${shard_id}/${NUM_SHARDS} on GPU ${gpu_id}"
+  echo "  log: ${log_file}"
+  (
+    export CUDA_VISIBLE_DEVICES="${gpu_id}"
+    python "${SCRIPT_DIR}/llava_spair_correspondence.py" \
+      --model-path "${MODEL_PATH}" \
+      --dataset-root "${DATASET_ROOT}" \
+      --split test \
+      --layout-size large \
+      --max-pairs "${MAX_PAIRS}" \
+      --pair-sampling "${PAIR_SAMPLING}" \
+      --pck-alpha "${PCK_ALPHA}" \
+      --prompt-format "${PROMPT_FORMAT}" \
+      --min-input-pixels "${MIN_INPUT_PIXELS}" \
+      --output-dir "${OUTPUT_DIR}" \
+      --device-map "cuda:0" \
+      --dtype bfloat16 \
+      --attn-implementation sdpa \
+      --num-shards "${NUM_SHARDS}" \
+      --shard-id "${shard_id}" \
+      "${extra_args[@]}"
+  ) >"${log_file}" 2>&1 &
+  pids+=("$!")
+  shard_id=$((shard_id + 1))
+done
+
+failed=0
+for pid in "${pids[@]}"; do
+  if ! wait "${pid}"; then
+    failed=1
+  fi
+done
+
+if (( failed != 0 )); then
+  echo "ERROR: one or more GPU shards failed. Check ${OUTPUT_DIR}/shard*.log" >&2
+  exit 1
 fi
 
-args+=("$@")
+merged="${OUTPUT_DIR}/test_predictions.jsonl"
+if (( NUM_SHARDS > 1 )); then
+  : > "${merged}"
+  for ((i = 0; i < NUM_SHARDS; i++)); do
+    shard_file="$(printf '%s/shards/shard%02d/test_predictions.jsonl' "${OUTPUT_DIR}" "${i}")"
+    if [[ -f "${shard_file}" ]]; then
+      cat "${shard_file}" >> "${merged}"
+    fi
+  done
+fi
 
-echo "Running: ${args[*]}"
-"${args[@]}"
+python "${SCRIPT_DIR}/llava_spair_correspondence.py" \
+  --dataset-root "${DATASET_ROOT}" \
+  --output-dir "${OUTPUT_DIR}" \
+  --split test \
+  --summary-only
+
+echo "Merged predictions: ${merged}"
+echo "Summary: ${OUTPUT_DIR}/test_summary.json"

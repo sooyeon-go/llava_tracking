@@ -164,6 +164,23 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Prepare marked inputs and prompts without loading a model.",
     )
+    parser.add_argument(
+        "--num-shards",
+        type=int,
+        default=1,
+        help="Split the selected pairs across this many workers.",
+    )
+    parser.add_argument(
+        "--shard-id",
+        type=int,
+        default=0,
+        help="Zero-based worker index in [0, --num-shards).",
+    )
+    parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="Only rebuild summary JSON from an existing predictions JSONL.",
+    )
     args = parser.parse_args()
 
     if args.max_pairs < 0:
@@ -172,7 +189,21 @@ def parse_args() -> argparse.Namespace:
         parser.error("--pck-alpha must be > 0")
     if args.min_input_pixels < 0:
         parser.error("--min-input-pixels must be >= 0")
+    if args.num_shards <= 0:
+        parser.error("--num-shards must be > 0")
+    if not (0 <= args.shard_id < args.num_shards):
+        parser.error("--shard-id must satisfy 0 <= shard-id < num-shards")
     return args
+
+
+def shard_pair_ids(pair_ids: list[str], num_shards: int, shard_id: int) -> list[str]:
+    if num_shards == 1:
+        return pair_ids
+    return [
+        pair_id
+        for index, pair_id in enumerate(pair_ids)
+        if index % num_shards == shard_id
+    ]
 
 
 def read_pair_ids(
@@ -814,10 +845,25 @@ def main() -> None:
     root = args.dataset_root.resolve()
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    results_path = output_dir / f"{args.split}_predictions.jsonl"
+    if args.num_shards > 1:
+        results_path = (
+            output_dir
+            / "shards"
+            / f"shard{args.shard_id:02d}"
+            / f"{args.split}_predictions.jsonl"
+        )
+        results_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        results_path = output_dir / f"{args.split}_predictions.jsonl"
     summary_path = output_dir / f"{args.split}_summary.json"
     visualization_dir = output_dir / "visualizations" / args.split
     dry_run_dir = output_dir / "dry_run"
+
+    if args.summary_only:
+        write_summary(results_path if args.num_shards == 1 else (
+            output_dir / f"{args.split}_predictions.jsonl"
+        ), summary_path, args)
+        return
 
     if args.overwrite and results_path.exists():
         results_path.unlink()
@@ -825,7 +871,15 @@ def main() -> None:
     categories = set(args.category) if args.category else None
     pair_ids = read_pair_ids(root, args.split, args.layout_size, categories)
     pair_ids = sample_pair_ids(pair_ids, args.max_pairs, args.pair_sampling)
-    LOGGER.info("Selected %d image pairs", len(pair_ids))
+    total_pairs = len(pair_ids)
+    pair_ids = shard_pair_ids(pair_ids, args.num_shards, args.shard_id)
+    LOGGER.info(
+        "Selected %d/%d image pairs for shard %d/%d",
+        len(pair_ids),
+        total_pairs,
+        args.shard_id,
+        args.num_shards,
+    )
 
     predictor = None
     if not args.dry_run:
@@ -919,8 +973,14 @@ def main() -> None:
 
     if args.dry_run:
         LOGGER.info("Prepared %d dry-run queries in %s", processed, dry_run_dir)
-    else:
+    elif args.num_shards == 1:
         write_summary(results_path, summary_path, args)
+    else:
+        LOGGER.info(
+            "Shard %d finished %d queries; summary will be built after merge",
+            args.shard_id,
+            processed,
+        )
 
 
 if __name__ == "__main__":
