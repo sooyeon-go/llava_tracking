@@ -32,7 +32,7 @@ fi
 mkdir -p "${OUTPUT_DIR}"
 if [[ "${OVERWRITE}" == "1" ]]; then
   rm -f "${OUTPUT_DIR}/test_predictions.jsonl" "${OUTPUT_DIR}/test_summary.json"
-  rm -rf "${OUTPUT_DIR}/shards"
+  rm -rf "${OUTPUT_DIR}/shards" "${OUTPUT_DIR}/visualizations"
 fi
 
 extra_args=()

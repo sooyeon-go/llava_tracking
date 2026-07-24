@@ -23,6 +23,20 @@ LOGGER = logging.getLogger("llava_spair_correspondence")
 COORDINATE_SCALE = 1000.0
 DEFAULT_MIN_INPUT_PIXELS = 832 * 480
 VISION_ALIGNMENT = 28  # patch_size (14) * spatial_merge_size (2)
+KEYPOINT_COLORS = (
+    "red",
+    "lime",
+    "cyan",
+    "yellow",
+    "magenta",
+    "orange",
+    "deepskyblue",
+    "violet",
+    "springgreen",
+    "gold",
+    "hotpink",
+    "turquoise",
+)
 
 
 @dataclass(frozen=True)
@@ -692,6 +706,27 @@ def read_completed_keys(results_path: Path) -> set[str]:
     return completed
 
 
+def read_prediction_records(results_path: Path) -> dict[str, Prediction]:
+    records = {}
+    if not results_path.is_file():
+        return records
+    with results_path.open() as results_file:
+        for line in results_file:
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+                prediction = Prediction(**value)
+                key = PredictionKey(
+                    prediction.pair_filename,
+                    prediction.keypoint_index,
+                )
+                records[key.value] = prediction
+            except (json.JSONDecodeError, TypeError, KeyError, ValueError):
+                continue
+    return records
+
+
 def selected_keypoints(
     annotation: dict[str, Any],
     requested_index: int | None,
@@ -703,58 +738,96 @@ def selected_keypoints(
         yield requested_index
 
 
-def draw_evaluation_visualization(
+def draw_pair_evaluation_visualization(
     source_image: Image.Image,
     target_image: Image.Image,
-    prediction: Prediction,
+    predictions: list[Prediction],
     marker_radius: int,
 ) -> Image.Image:
-    source = draw_point_marker(
-        source_image, prediction.source_point, marker_radius, color="red"
-    )
+    source = source_image.convert("RGB").copy()
     target = target_image.convert("RGB").copy()
+    source_draw = ImageDraw.Draw(source)
     target_draw = ImageDraw.Draw(target)
-    gt_x, gt_y = prediction.target_ground_truth
-    target_draw.ellipse(
-        (
-            gt_x - marker_radius,
-            gt_y - marker_radius,
-            gt_x + marker_radius,
-            gt_y + marker_radius,
-        ),
-        outline="blue",
-        width=3,
-    )
-    if prediction.target_prediction is not None:
-        pred_x, pred_y = prediction.target_prediction
-        target_draw.line(
+    line_width = max(3, marker_radius // 3)
+
+    for color_index, prediction in enumerate(predictions):
+        color = KEYPOINT_COLORS[color_index % len(KEYPOINT_COLORS)]
+        label = f"kp{prediction.keypoint_id}"
+
+        source_x, source_y = prediction.source_point
+        source_draw.ellipse(
             (
-                pred_x - marker_radius,
-                pred_y,
-                pred_x + marker_radius,
-                pred_y,
+                source_x - marker_radius,
+                source_y - marker_radius,
+                source_x + marker_radius,
+                source_y + marker_radius,
             ),
-            fill="lime",
-            width=4,
+            outline=color,
+            width=line_width,
         )
-        target_draw.line(
-            (
-                pred_x,
-                pred_y - marker_radius,
-                pred_x,
-                pred_y + marker_radius,
-            ),
-            fill="lime",
-            width=4,
+        source_draw.text(
+            (source_x + marker_radius + 2, source_y - marker_radius),
+            label,
+            fill=color,
         )
 
+        gt_x, gt_y = prediction.target_ground_truth
+        target_draw.ellipse(
+            (
+                gt_x - marker_radius,
+                gt_y - marker_radius,
+                gt_x + marker_radius,
+                gt_y + marker_radius,
+            ),
+            outline=color,
+            width=line_width,
+        )
+        if prediction.target_prediction is not None:
+            pred_x, pred_y = prediction.target_prediction
+            target_draw.line(
+                (
+                    pred_x - marker_radius,
+                    pred_y,
+                    pred_x + marker_radius,
+                    pred_y,
+                ),
+                fill=color,
+                width=line_width,
+            )
+            target_draw.line(
+                (
+                    pred_x,
+                    pred_y - marker_radius,
+                    pred_x,
+                    pred_y + marker_radius,
+                ),
+                fill=color,
+                width=line_width,
+            )
+            target_draw.text(
+                (pred_x + marker_radius + 2, pred_y - marker_radius),
+                label,
+                fill=color,
+            )
+
+    header_height = 28
     canvas = Image.new(
         "RGB",
-        (source.width + target.width, max(source.height, target.height)),
+        (
+            source.width + target.width,
+            header_height + max(source.height, target.height),
+        ),
         color="black",
     )
-    canvas.paste(source, (0, 0))
-    canvas.paste(target, (source.width, 0))
+    canvas_draw = ImageDraw.Draw(canvas)
+    canvas_draw.text((6, 6), "SOURCE: query circle", fill="white")
+    canvas_draw.text(
+        (source.width + 6, 6),
+        "TARGET: circle=GT, cross=prediction",
+        fill="white",
+    )
+    canvas.paste(source, (0, header_height))
+    canvas.paste(target, (source.width, header_height))
     return canvas
 
 
@@ -811,6 +884,11 @@ def write_summary(results_path: Path, summary_path: Path, args: argparse.Namespa
                 if category_records
                 else 0.0
             ),
+            "accuracy_pck": (
+                len(category_correct) / len(category_records)
+                if category_records
+                else 0.0
+            ),
             "pck_among_valid": (
                 len(category_correct) / len(category_valid)
                 if category_valid
@@ -822,12 +900,17 @@ def write_summary(results_path: Path, summary_path: Path, args: argparse.Namespa
         "layout_size": args.layout_size,
         "pair_sampling": args.pair_sampling,
         "pck_alpha": args.pck_alpha,
+        "accuracy_metric": (
+            "PCK: prediction is correct when pixel error <= "
+            "alpha * max(target bounding-box width, height)"
+        ),
         "prompt_format": args.prompt_format,
         "min_input_pixels": args.min_input_pixels,
         "num_predictions": len(records),
         "num_valid_predictions": len(valid),
         "parse_rate": len(valid) / len(records) if records else 0.0,
         "pck": len(correct) / len(records) if records else 0.0,
+        "accuracy_pck": len(correct) / len(records) if records else 0.0,
         "pck_among_valid": len(correct) / len(valid) if valid else 0.0,
         "mean_pixel_error_valid": sum(errors) / len(errors) if errors else None,
         "by_category": category_summary,
@@ -868,6 +951,7 @@ def main() -> None:
     if args.overwrite and results_path.exists():
         results_path.unlink()
     completed_keys = read_completed_keys(results_path)
+    existing_predictions = read_prediction_records(results_path)
     categories = set(args.category) if args.category else None
     pair_ids = read_pair_ids(root, args.split, args.layout_size, categories)
     pair_ids = sample_pair_ids(pair_ids, args.max_pairs, args.pair_sampling)
@@ -903,10 +987,14 @@ def main() -> None:
             source_image, args.min_input_pixels
         )
         target_input, _ = prepare_input_image(target_image, args.min_input_pixels)
+        pair_predictions: list[Prediction] = []
 
         for keypoint_index in selected_keypoints(annotation, args.keypoint_index):
             prediction_key = PredictionKey(pair_filename, keypoint_index)
             if prediction_key.value in completed_keys:
+                existing = existing_predictions.get(prediction_key.value)
+                if existing is not None:
+                    pair_predictions.append(existing)
                 continue
 
             source_point = annotation["src_kps"][keypoint_index]
@@ -949,20 +1037,10 @@ def main() -> None:
                 results_file.write(json.dumps(asdict(prediction)) + "\n")
                 results_file.flush()
             completed_keys.add(prediction_key.value)
+            existing_predictions[prediction_key.value] = prediction
+            pair_predictions.append(prediction)
             processed += 1
 
-            if args.save_visualizations:
-                category_dir = visualization_dir / annotation["category"]
-                category_dir.mkdir(parents=True, exist_ok=True)
-                visualization = draw_evaluation_visualization(
-                    source_image,
-                    target_image,
-                    prediction,
-                    args.marker_radius,
-                )
-                visualization.save(
-                    category_dir / f"{pair_filename}_kp{keypoint_index}.jpg"
-                )
             LOGGER.info(
                 "%s output=%r error=%s correct=%s",
                 prediction_key.value,
@@ -970,6 +1048,20 @@ def main() -> None:
                 prediction.pixel_error,
                 prediction.pck_correct,
             )
+
+        if args.save_visualizations and pair_predictions and not args.dry_run:
+            category_dir = visualization_dir / annotation["category"]
+            category_dir.mkdir(parents=True, exist_ok=True)
+            visualization = draw_pair_evaluation_visualization(
+                source_image,
+                target_image,
+                sorted(
+                    pair_predictions,
+                    key=lambda item: item.keypoint_index,
+                ),
+                args.marker_radius,
+            )
+            visualization.save(category_dir / f"{pair_filename}.jpg")
 
     if args.dry_run:
         LOGGER.info("Prepared %d dry-run queries in %s", processed, dry_run_dir)
