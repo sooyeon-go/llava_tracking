@@ -75,7 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset-root",
         type=Path,
-        default=Path(__file__).resolve().parent.parent,
+        default=Path("/data/shared-vilab/datasets/spair-71k/SPair-71k"),
     )
     parser.add_argument("--split", choices=("trn", "val", "test"), default="test")
     parser.add_argument(

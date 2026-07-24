@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-DATASET_ROOT="${DATASET_ROOT:-$(cd -- "${SCRIPT_DIR}/.." && pwd)}"
+DATASET_ROOT="${DATASET_ROOT:-/data/shared-vilab/datasets/spair-71k/SPair-71k}"
 
 if [[ -z "${CONDA_DEFAULT_ENV:-}" && -z "${VIRTUAL_ENV:-}" && -x "${SCRIPT_DIR}/.venv/bin/python" ]]; then
   # shellcheck disable=SC1091
