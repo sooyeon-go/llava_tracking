@@ -29,10 +29,12 @@ if (( NUM_SHARDS < 1 )); then
   exit 1
 fi
 
+WATCH_PROGRESS="${WATCH_PROGRESS:-1}"
+
 mkdir -p "${OUTPUT_DIR}"
 if [[ "${OVERWRITE}" == "1" ]]; then
   rm -f "${OUTPUT_DIR}/test_predictions.jsonl" "${OUTPUT_DIR}/test_summary.json"
-  rm -rf "${OUTPUT_DIR}/shards" "${OUTPUT_DIR}/visualizations"
+  rm -rf "${OUTPUT_DIR}/shards" "${OUTPUT_DIR}/visualizations" "${OUTPUT_DIR}/progress"
 fi
 
 extra_args=()
@@ -55,7 +57,9 @@ for gpu_id in "${GPU_ARRAY[@]}"; do
   echo "  log: ${log_file}"
   (
     export CUDA_VISIBLE_DEVICES="${gpu_id}"
-    python "${SCRIPT_DIR}/llava_spair_correspondence.py" \
+    # Force plain tqdm lines into log files (readable with tail -f).
+    export TQDM_DISABLE=0
+    python -u "${SCRIPT_DIR}/llava_spair_correspondence.py" \
       --model-path "${MODEL_PATH}" \
       --dataset-root "${DATASET_ROOT}" \
       --split test \
@@ -77,12 +81,27 @@ for gpu_id in "${GPU_ARRAY[@]}"; do
   shard_id=$((shard_id + 1))
 done
 
+echo "Progress files: ${OUTPUT_DIR}/progress/shardXX.json"
+echo "Watch live:     python ${SCRIPT_DIR}/watch_spair_progress.py --output-dir ${OUTPUT_DIR}"
+
+monitor_pid=""
+if [[ "${WATCH_PROGRESS}" == "1" ]]; then
+  python "${SCRIPT_DIR}/watch_spair_progress.py" --output-dir "${OUTPUT_DIR}" &
+  monitor_pid="$!"
+fi
+
 failed=0
 for pid in "${pids[@]}"; do
   if ! wait "${pid}"; then
     failed=1
   fi
 done
+
+if [[ -n "${monitor_pid}" ]]; then
+  kill "${monitor_pid}" 2>/dev/null || true
+  wait "${monitor_pid}" 2>/dev/null || true
+  python "${SCRIPT_DIR}/watch_spair_progress.py" --output-dir "${OUTPUT_DIR}" --once || true
+fi
 
 if (( failed != 0 )); then
   echo "ERROR: one or more GPU shards failed. Check ${OUTPUT_DIR}/shard*.log" >&2

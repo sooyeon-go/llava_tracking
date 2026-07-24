@@ -13,11 +13,17 @@ import json
 import logging
 import math
 import re
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from PIL import Image, ImageDraw
+
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover - fallback if tqdm is missing
+    tqdm = None  # type: ignore[assignment]
 
 LOGGER = logging.getLogger("llava_spair_correspondence")
 COORDINATE_SCALE = 1000.0
@@ -738,6 +744,44 @@ def selected_keypoints(
         yield requested_index
 
 
+def count_selected_keypoints(
+    annotation: dict[str, Any],
+    requested_index: int | None,
+) -> int:
+    return sum(1 for _ in selected_keypoints(annotation, requested_index))
+
+
+def write_progress(
+    progress_path: Path,
+    *,
+    shard_id: int,
+    num_shards: int,
+    total_pairs: int,
+    done_pairs: int,
+    total_queries: int,
+    done_queries: int,
+    current_pair: str | None = None,
+) -> None:
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "shard_id": shard_id,
+        "num_shards": num_shards,
+        "total_pairs": total_pairs,
+        "done_pairs": done_pairs,
+        "total_queries": total_queries,
+        "done_queries": done_queries,
+        "pair_fraction": (
+            done_pairs / total_pairs if total_pairs else 1.0
+        ),
+        "query_fraction": (
+            done_queries / total_queries if total_queries else 1.0
+        ),
+        "current_pair": current_pair,
+        "updated_at": time.time(),
+    }
+    progress_path.write_text(json.dumps(payload, indent=2) + "\n")
+
+
 def draw_pair_evaluation_visualization(
     source_image: Image.Image,
     target_image: Image.Image,
@@ -977,9 +1021,51 @@ def main() -> None:
     else:
         dry_run_dir.mkdir(parents=True, exist_ok=True)
 
+    progress_path = (
+        output_dir
+        / "progress"
+        / f"shard{args.shard_id:02d}.json"
+    )
+    annotations_cache = {
+        pair_filename: load_annotation(root, args.split, pair_filename)
+        for pair_filename in pair_ids
+    }
+    total_queries = sum(
+        count_selected_keypoints(annotation, args.keypoint_index)
+        for annotation in annotations_cache.values()
+    )
+    done_queries = sum(
+        1
+        for pair_filename, annotation in annotations_cache.items()
+        for keypoint_index in selected_keypoints(annotation, args.keypoint_index)
+        if PredictionKey(pair_filename, keypoint_index).value in completed_keys
+    )
+    done_pairs = 0
+    write_progress(
+        progress_path,
+        shard_id=args.shard_id,
+        num_shards=args.num_shards,
+        total_pairs=len(pair_ids),
+        done_pairs=0,
+        total_queries=total_queries,
+        done_queries=done_queries,
+    )
+
+    pair_iter: Iterable[str] = pair_ids
+    progress_bar = None
+    if tqdm is not None:
+        progress_bar = tqdm(
+            pair_ids,
+            desc=f"shard{args.shard_id:02d}",
+            unit="pair",
+            total=len(pair_ids),
+            leave=True,
+        )
+        pair_iter = progress_bar
+
     processed = 0
-    for pair_filename in pair_ids:
-        annotation = load_annotation(root, args.split, pair_filename)
+    for pair_filename in pair_iter:
+        annotation = annotations_cache[pair_filename]
         image_dir = root / "JPEGImages" / annotation["category"]
         source_image = Image.open(image_dir / annotation["src_imname"]).convert("RGB")
         target_image = Image.open(image_dir / annotation["trg_imname"]).convert("RGB")
@@ -1014,6 +1100,7 @@ def main() -> None:
                 target_input.save(dry_run_dir / f"{stem}_target.png")
                 (dry_run_dir / f"{stem}_prompt.txt").write_text(prompt + "\n")
                 processed += 1
+                done_queries += 1
                 continue
 
             assert predictor is not None
@@ -1040,6 +1127,7 @@ def main() -> None:
             existing_predictions[prediction_key.value] = prediction
             pair_predictions.append(prediction)
             processed += 1
+            done_queries += 1
 
             LOGGER.info(
                 "%s output=%r error=%s correct=%s",
@@ -1062,6 +1150,37 @@ def main() -> None:
                 args.marker_radius,
             )
             visualization.save(category_dir / f"{pair_filename}.jpg")
+
+        done_pairs += 1
+        write_progress(
+            progress_path,
+            shard_id=args.shard_id,
+            num_shards=args.num_shards,
+            total_pairs=len(pair_ids),
+            done_pairs=done_pairs,
+            total_queries=total_queries,
+            done_queries=done_queries,
+            current_pair=pair_filename,
+        )
+        if progress_bar is not None:
+            progress_bar.set_postfix(
+                queries=f"{done_queries}/{total_queries}",
+                refresh=False,
+            )
+
+    if progress_bar is not None:
+        progress_bar.close()
+
+    write_progress(
+        progress_path,
+        shard_id=args.shard_id,
+        num_shards=args.num_shards,
+        total_pairs=len(pair_ids),
+        done_pairs=len(pair_ids),
+        total_queries=total_queries,
+        done_queries=done_queries,
+        current_pair=None,
+    )
 
     if args.dry_run:
         LOGGER.info("Prepared %d dry-run queries in %s", processed, dry_run_dir)
