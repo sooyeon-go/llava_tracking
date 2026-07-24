@@ -1,0 +1,9 @@
+# Molmo2-8B official model-card environment (install torch for your CUDA first).
+transformers==4.57.1
+accelerate>=0.26.0
+pillow>=10.0.0
+einops>=0.7.0
+torchvision
+decord2
+molmo_utils
+tqdm>=4.66.0
