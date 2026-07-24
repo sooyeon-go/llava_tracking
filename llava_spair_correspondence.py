@@ -75,7 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset-root",
         type=Path,
-        default=Path(__file__).resolve().parent,
+        default=Path(__file__).resolve().parent.parent,
     )
     parser.add_argument("--split", choices=("trn", "val", "test"), default="test")
     parser.add_argument(
@@ -86,6 +86,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Maximum pairs to process; 0 processes the entire split.",
+    )
+    parser.add_argument(
+        "--pair-sampling",
+        choices=("first", "stratified"),
+        default="stratified",
+        help=(
+            "How to select --max-pairs. stratified round-robins across object "
+            "categories so a short test is not dominated by one category."
+        ),
     )
     parser.add_argument(
         "--category",
@@ -185,6 +194,39 @@ def read_pair_ids(
             if pair_id.rsplit(":", maxsplit=1)[-1] in categories
         ]
     return pair_ids
+
+
+def sample_pair_ids(
+    pair_ids: list[str],
+    max_pairs: int,
+    sampling: str,
+) -> list[str]:
+    if max_pairs == 0 or len(pair_ids) <= max_pairs:
+        return pair_ids
+    if sampling == "first":
+        return pair_ids[:max_pairs]
+
+    by_category: dict[str, list[str]] = {}
+    for pair_id in pair_ids:
+        category = pair_id.rsplit(":", maxsplit=1)[-1]
+        by_category.setdefault(category, []).append(pair_id)
+
+    selected = []
+    categories = sorted(by_category)
+    pair_index = 0
+    while len(selected) < max_pairs:
+        added = False
+        for category in categories:
+            category_pairs = by_category[category]
+            if pair_index < len(category_pairs):
+                selected.append(category_pairs[pair_index])
+                added = True
+                if len(selected) == max_pairs:
+                    break
+        if not added:
+            break
+        pair_index += 1
+    return selected
 
 
 def load_annotation(root: Path, split: str, pair_filename: str) -> dict[str, Any]:
@@ -440,7 +482,7 @@ class LlavaOneVisionPredictor:
         dtype = getattr(torch, dtype_name)
         model_kwargs = {
             "trust_remote_code": True,
-            "torch_dtype": dtype,
+            "dtype": dtype,
             "device_map": device_map,
             "attn_implementation": attn_implementation,
         }
@@ -703,9 +745,51 @@ def write_summary(results_path: Path, summary_path: Path, args: argparse.Namespa
         for record in valid
         if record.get("pixel_error") is not None
     ]
+    category_summary = {}
+    categories = sorted(
+        {
+            str(record.get("category"))
+            for record in records
+            if record.get("category") is not None
+        }
+    )
+    for category in categories:
+        category_records = [
+            record for record in records if record.get("category") == category
+        ]
+        category_valid = [
+            record
+            for record in category_records
+            if record.get("valid_prediction")
+        ]
+        category_correct = [
+            record
+            for record in category_records
+            if record.get("pck_correct")
+        ]
+        category_summary[category] = {
+            "num_predictions": len(category_records),
+            "num_valid_predictions": len(category_valid),
+            "parse_rate": (
+                len(category_valid) / len(category_records)
+                if category_records
+                else 0.0
+            ),
+            "pck": (
+                len(category_correct) / len(category_records)
+                if category_records
+                else 0.0
+            ),
+            "pck_among_valid": (
+                len(category_correct) / len(category_valid)
+                if category_valid
+                else 0.0
+            ),
+        }
     summary = {
         "split": args.split,
         "layout_size": args.layout_size,
+        "pair_sampling": args.pair_sampling,
         "pck_alpha": args.pck_alpha,
         "prompt_format": args.prompt_format,
         "min_input_pixels": args.min_input_pixels,
@@ -715,6 +799,7 @@ def write_summary(results_path: Path, summary_path: Path, args: argparse.Namespa
         "pck": len(correct) / len(records) if records else 0.0,
         "pck_among_valid": len(correct) / len(valid) if valid else 0.0,
         "mean_pixel_error_valid": sum(errors) / len(errors) if errors else None,
+        "by_category": category_summary,
     }
     summary_path.write_text(json.dumps(summary, indent=2) + "\n")
     LOGGER.info("Summary: %s", json.dumps(summary))
@@ -739,8 +824,7 @@ def main() -> None:
     completed_keys = read_completed_keys(results_path)
     categories = set(args.category) if args.category else None
     pair_ids = read_pair_ids(root, args.split, args.layout_size, categories)
-    if args.max_pairs:
-        pair_ids = pair_ids[: args.max_pairs]
+    pair_ids = sample_pair_ids(pair_ids, args.max_pairs, args.pair_sampling)
     LOGGER.info("Selected %d image pairs", len(pair_ids))
 
     predictor = None
